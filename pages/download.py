@@ -1,7 +1,7 @@
 import streamlit as st
 import subprocess
 import os
-from pages.chat_manager import OllamaChatManager
+from chat_manager import OllamaChatManager
 
 # Custom dark UI injection to match your look
 st.markdown(
