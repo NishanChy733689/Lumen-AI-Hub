@@ -17,7 +17,14 @@ def load_css():
             return f.read()
     except FileNotFoundError:
         return ""
+def get_current_user_id():
+    if st.session_state.get("username"):
+        return st.session_state.username.lower().strip()
+    if st.session_state.get("user_id") is not None:
+        return str(st.session_state.user_id)
+    return "admin_user"
 
+USER_ID = get_current_user_id()
 css = load_css()
 if css:
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
@@ -36,14 +43,7 @@ if not st.session_state.get("logged_in", False):
         st.switch_page("main_app.py")
     st.stop()
 
-def get_current_user_id():
-    if st.session_state.get("username"):
-        return st.session_state.username.lower().strip()
-    if st.session_state.get("user_id") is not None:
-        return str(st.session_state.user_id)
-    return "admin_user"
 
-USER_ID = get_current_user_id()
 
 # --- STATE INITIALIZATION ---
 if "processing_prompt" not in st.session_state:

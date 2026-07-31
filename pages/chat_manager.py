@@ -11,8 +11,9 @@ import platform
 import shutil
 import json
 from datetime import datetime
+import streamlit as st
 DEFAULT_MODEL = "smollm2:135m"
-THINKING_MODELS = {"qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:1.2b",}
+THINKING_MODELS = {"qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:1.2b","lfm2.5-thinking:1.2b"}
 
 # =========================
 # Utilities
@@ -149,47 +150,53 @@ def system_information():
         "processor": platform.processor()
     }
 
-
 # =========================
 # Registry
 # =========================
 
-TOOLS = [
-    # Utilities
-     get_time,
-    get_date,
-    random_number,
-    flip_coin,
-    roll_dice,
-    generate_uuid,
-     generate_password,
-    hash_text,
-    encode_base64,
-    decode_base64,
-     count_words,
-     count_characters,
 
-    # Ollama
-     list_installed_models,
-    show_model_information,
-    delete_model,
-    download_model,
-   update_model,
-
-    # Debug
-    app_version,
-    server_status,
-    cpu_usage,
-    memory_usage,
-    disk_usage,
-    system_information,
-]
 
 class OllamaChatManager:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or os.path.join(os.path.dirname(__file__), "chat_history.db")
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self.username=st.session_state.get("username", "anonymous").lower().strip() or "anonymous"
         self._init_db()
+
+        self.TOOLS = [
+                # Utilities
+                get_time,
+                get_date,
+                random_number,
+                flip_coin,
+                roll_dice,
+                generate_uuid,
+                generate_password,
+                hash_text,
+                encode_base64,
+                decode_base64,
+                count_words,
+                count_characters,
+
+                # Ollama
+                list_installed_models,
+                show_model_information,
+                delete_model,
+                download_model,
+            update_model,
+            #User information
+            self.save_preference,
+            self.retrieve_preferences,
+
+                # Debug
+                app_version,
+                server_status,
+                cpu_usage,
+                memory_usage,
+                disk_usage,
+                system_information,
+                
+            ]
 
     def _connect_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -210,7 +217,17 @@ class OllamaChatManager:
                 )
                 """
             )
-            
+           
+
+            # Create the preferences table
+            # Storing each preference as a new row allows us to easily "append" to a user's list
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    preference TEXT NOT NULL
+                )
+            ''')
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_history (
@@ -224,6 +241,40 @@ class OllamaChatManager:
             )
 
             conn.commit()
+    def save_preference(self,preference: str):
+        """
+        Appends a new preference for the user. 
+        Because we use a relational table, inserting a new row acts like appending to a list.
+        """
+        # Use the built-in connection manager which handles the correct db_path
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO user_preferences (username, preference)
+                VALUES (?, ?)
+            ''', (self.username, preference))
+            conn.commit()
+            
+        print(f"[PREFERENCES] Saved new preference for '{self.username}'.")
+        return f"Successfully saved preference for {self.username}."
+
+    def retrieve_preferences(self) -> list:
+        """
+        Retrieves all preferences for a given username and returns them as a Python list.
+        This list can be injected into the system prompt for your Ollama models.
+        """
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT preference FROM user_preferences WHERE username = ?
+            ''', (self.username,))
+
+            # Fetch all matching rows. 
+            # Since _connect_db uses sqlite3.Row, we access it by column name.
+            results = cursor.fetchall()
+            preferences_list = [row["preference"] for row in results]
+
+        return preferences_list
 
     def _sanitize_text(self, value: Any, fallback: str = "") -> str:
         if value is None:
@@ -240,18 +291,29 @@ class OllamaChatManager:
 
     def _build_messages_payload(self, history: List[Dict[str, str]], current_prompt: str) -> List[Dict[str, str]]:
         """Convert stored history into a clean message list for Ollama without duplicating the latest prompt."""
-        messages: List[Dict[str, str]] = []
+        
+        # 1. Fetch user preferences
+        
+
+        # 3. Initialize messages with the system prompt
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system_content}
+        ]
+        
+        # 4. Append chat history
         for item in history:
             role = self._sanitize_text(item.get("role"), "user").lower()
-            if role not in {"user", "assistant", "system"}:
+            if role not in {"user", "assistant", "system", "tool"}:
                 role = "user"
             content = self._sanitize_text(item.get("content"), "")
             if content:
                 messages.append({"role": role, "content": content})
 
+        # 5. Append current prompt
         current_prompt_text = self._sanitize_text(current_prompt, "")
         if current_prompt_text:
             messages.append({"role": "user", "content": current_prompt_text})
+        print(f"[DEBUG] message load {messages} ")
         return messages
 
     # ==========================================
@@ -350,7 +412,18 @@ class OllamaChatManager:
                 (safe_uid, safe_limit),
             )
             rows = cursor.fetchall()
-            return [{"role": row["role"], "content": row["content"]} for row in rows]
+            user_prefs = self.retrieve_preferences(self.username)
+            print(f"[PREFERENCES] Retrieved preferences for '{self.username}': {user_prefs}")
+                    # 2. Build the dynamic system prompt
+            system_content = "You are a helpful AI assistant."
+            if user_prefs:
+                        system_content += f"\n\nPlease adhere to the following user preferences:\n{json.dumps(user_prefs)}"
+            formatted_rows = []
+            for row in rows:
+                formatted_rows.append({"role": "system", "content": system_content})
+                formatted_rows.append({"role": row["role"], "content": row["content"]} for row in rows)
+            return formatted_rows
+            
 
     def clear_chat_history(self, uid: str) -> None:
         """Clear all chat history for a user."""
@@ -365,11 +438,11 @@ class OllamaChatManager:
 
 
     # Ensure TOOL_MAP is built from your list of tool functions
-    # (assuming TOOLS is either a list of functions or a dict of name -> function)
+    # (assumingself.TOOLS is either a list of functions or a dict of name -> function)
     def tool_support(self, model_name: str) -> bool:
         """Checks if a model explicitly supports tool/function calling."""
         # List of known function calling model families
-        tool_capable_keywords = ["granite3.3:2b", 'functiongemma:270m', "llama3.1", "llama3.2", "llama3.3", "qwen2.5", "mistral-nemo", "command-r"]
+        tool_capable_keywords = ["granite3.3:2b","lfm2.5-thinking:1.2b", 'functiongemma:270m', "llama3.1", "llama3.2", "llama3.3", "qwen2.5", "mistral-nemo", "command-r"]
         
         
         model_lower = model_name.lower()
@@ -400,13 +473,13 @@ class OllamaChatManager:
 
         self.append_message(safe_uid, "user", safe_prompt)
 
-        # Build lookup map if TOOLS is a list, or use as-is if TOOLS is a dict
-        if isinstance(TOOLS, list):
-            tool_map = {func.__name__: func for func in TOOLS}
-            tools_param = TOOLS
-        elif isinstance(TOOLS, dict):
-            tool_map = TOOLS
-            tools_param = list(TOOLS.values())
+        # Build lookup map ifself.TOOLS is a list, or use as-is ifself.TOOLS is a dict
+        if isinstance(self.TOOLS, list):
+            tool_map = {func.__name__: func for func in self.TOOLS}
+            tools_param =self.TOOLS
+        elif isinstance(self.TOOLS, dict):
+            tool_map =self.TOOLS
+            tools_param = list(self.TOOLS.values())
         else:
             tool_map = {}
             tools_param = None
@@ -420,7 +493,7 @@ class OllamaChatManager:
                 "stream": True,
                 "options": {
                     "num_ctx": 1024,
-                    "num_predict": 768,
+                    "num_predict": 512,
                     "num_gpu": 24,
                     "num_batch": 32,
                     "temperature": 0.7,
