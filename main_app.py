@@ -143,7 +143,7 @@ def render_login_view():
     with center_col:
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.title("Lumen AI hub Access Portal")
-        st.caption("Secure Local Sandbox Testing Authentication Unit")
+        st.caption("Secure Local Authentication Unit")
         
         tab_login, tab_register = st.tabs(["🔑 Account Authentication", "➕ Register New User"])
         

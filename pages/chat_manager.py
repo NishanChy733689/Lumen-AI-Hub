@@ -9,9 +9,10 @@ import base64
 import psutil
 import platform
 import shutil
+import json
 from datetime import datetime
-DEFAULT_MODEL = "smoll2:135m"
-THINKING_MODELS = {"qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:1.2b"}
+DEFAULT_MODEL = "smollm2:135m"
+THINKING_MODELS = {"qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:1.2b",}
 
 # =========================
 # Utilities
@@ -209,7 +210,7 @@ class OllamaChatManager:
                 )
                 """
             )
-
+            
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_history (
