@@ -185,7 +185,8 @@ class OllamaChatManager:
                 download_model,
             update_model,
             #User information
-            
+            self.save_preference,
+            self.retrieve_preferences,
 
                 # Debug
                 app_version,
@@ -216,7 +217,17 @@ class OllamaChatManager:
                 )
                 """
             )
+           
 
+            # Create the preferences table
+            # Storing each preference as a new row allows us to easily "append" to a user's list
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    preference TEXT NOT NULL
+                )
+            ''')
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_history (
@@ -230,7 +241,40 @@ class OllamaChatManager:
             )
 
             conn.commit()
+    def save_preference(self,preference: str):
+        """
+        Appends a new preference for the user. 
+        Because we use a relational table, inserting a new row acts like appending to a list.
+        """
+        # Use the built-in connection manager which handles the correct db_path
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO user_preferences (username, preference)
+                VALUES (?, ?)
+            ''', (self.username, preference))
+            conn.commit()
+            
+        print(f"[PREFERENCES] Saved new preference for '{self.username}'.")
+        return f"Successfully saved preference for {self.username}."
 
+    def retrieve_preferences(self) -> list:
+        """
+        Retrieves all preferences for a given username and returns them as a Python list.
+        This list can be injected into the system prompt for your Ollama models.
+        """
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT preference FROM user_preferences WHERE username = ?
+            ''', (self.username,))
+
+            # Fetch all matching rows. 
+            # Since _connect_db uses sqlite3.Row, we access it by column name.
+            results = cursor.fetchall()
+            preferences_list = [row["preference"] for row in results]
+
+        return preferences_list
 
     def _sanitize_text(self, value: Any, fallback: str = "") -> str:
         if value is None:
@@ -247,8 +291,13 @@ class OllamaChatManager:
 
     def _build_messages_payload(self, history: List[Dict[str, str]], current_prompt: str) -> List[Dict[str, str]]:
         """Convert stored history into a clean message list for Ollama without duplicating the latest prompt."""
+        
+        # 1. Fetch user preferences
+        
+
+        # 3. Initialize messages with the system prompt
         messages: List[Dict[str, str]] = [
-            
+            {"role": "system", "content": system_content}
         ]
         
         # 4. Append chat history
@@ -363,8 +412,17 @@ class OllamaChatManager:
                 (safe_uid, safe_limit),
             )
             rows = cursor.fetchall()
- 
-            return [{"role": row["role"], "content": row["content"]} for row in rows]
+            user_prefs = self.retrieve_preferences(self.username)
+            print(f"[PREFERENCES] Retrieved preferences for '{self.username}': {user_prefs}")
+                    # 2. Build the dynamic system prompt
+            system_content = "You are a helpful AI assistant."
+            if user_prefs:
+                        system_content += f"\n\nPlease adhere to the following user preferences:\n{json.dumps(user_prefs)}"
+            formatted_rows = []
+            for row in rows:
+                formatted_rows.append({"role": "system", "content": system_content})
+                formatted_rows.append({"role": row["role"], "content": row["content"]} for row in rows)
+            return formatted_rows
             
 
     def clear_chat_history(self, uid: str) -> None:
