@@ -216,7 +216,6 @@ class OllamaChatManager:
                 )
                 """
             )
-
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_history (
@@ -230,6 +229,40 @@ class OllamaChatManager:
             )
 
             conn.commit()
+    def save_preference(self,preference: str):
+        """
+        Appends a new preference for the user. 
+        Because we use a relational table, inserting a new row acts like appending to a list.
+        """
+        # Use the built-in connection manager which handles the correct db_path
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO user_preferences (username, preference)
+                VALUES (?, ?)
+            ''', (self.username, preference))
+            conn.commit()
+            
+        print(f"[PREFERENCES] Saved new preference for '{self.username}'.")
+        return f"Successfully saved preference for {self.username}."
+
+    def retrieve_preferences(self) -> list:
+        """
+        Retrieves all preferences for a given username and returns them as a Python list.
+        This list can be injected into the system prompt for your Ollama models.
+        """
+        with self._connect_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT preference FROM user_preferences WHERE username = ?
+            ''', (self.username,))
+
+            # Fetch all matching rows. 
+            # Since _connect_db uses sqlite3.Row, we access it by column name.
+            results = cursor.fetchall()
+            preferences_list = [row["preference"] for row in results]
+
+        return preferences_list
 
 
     def _sanitize_text(self, value: Any, fallback: str = "") -> str:
