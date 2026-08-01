@@ -5,13 +5,11 @@ import ollama
 # Backend Functions
 # ------------------------------
 
+
 def list_installed_models():
     models = ollama.list()
 
-    return [
-        model["model"]
-        for model in models["models"]
-    ]
+    return [model["model"] for model in models["models"]]
 
 
 def show_model_information(model_name):
@@ -38,9 +36,7 @@ def update_model(model_name):
 # ------------------------------
 
 st.set_page_config(
-    page_title="Lumen AI Hub - Model Manager",
-    page_icon="🤖",
-    layout="wide"
+    page_title="Lumen AI Hub - Model Manager", page_icon="🤖", layout="wide"
 )
 
 st.title("🤖 Lumen AI Hub")
@@ -66,10 +62,7 @@ with left:
 
     if installed_models:
 
-        selected_model = st.selectbox(
-            "Choose a model",
-            installed_models
-        )
+        selected_model = st.selectbox("Choose a model", installed_models)
 
         col1, col2, col3 = st.columns(3)
 
@@ -107,10 +100,7 @@ with right:
 
     st.header("Download Model")
 
-    model_name = st.text_input(
-        "Model Name",
-        placeholder="e.g. llama3.2:3b"
-    )
+    model_name = st.text_input("Model Name", placeholder="e.g. llama3.2:3b")
 
     if st.button("📥 Download"):
 
