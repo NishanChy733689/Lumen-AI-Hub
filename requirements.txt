@@ -1,5 +1,4 @@
 ollama
 streamlit
 psutil
-subprocess
-shutil
+pynvml

@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from pages.chat_manager import OllamaChatManager
 
 # 1. Page Configuration
@@ -36,6 +37,11 @@ if "db_manager" not in st.session_state:
     st.session_state.db_manager = OllamaChatManager()
 
 manager = st.session_state.db_manager
+
+# Repair stale session-state objects after code changes
+if not hasattr(manager, "unload_current_user_model"):
+    st.session_state.db_manager = OllamaChatManager()
+    manager = st.session_state.db_manager
 
 # Ensure the page is only accessible after login
 if not st.session_state.get("logged_in", False):
@@ -87,6 +93,24 @@ with st.sidebar:
     st.markdown("### 💬 Chat Settings")
     st.caption(f"User: {USER_ID}")
 
+    vram_status = manager.get_vram_status()
+    limit_gb = getattr(manager, "VRAM_LIMIT_GB", 2.0)
+    if vram_status:
+        st.caption(
+            f"VRAM: {vram_status['used_gb']} / {vram_status['total_gb']} GB used"
+        )
+        force_q4_threshold = getattr(manager, "FORCE_Q4_TOTAL_VRAM_GB", 2.0)
+        if vram_status["total_gb"] <= force_q4_threshold:
+            st.caption(
+                f"Policy: 4-bit fallback forced due to low total VRAM (≤{force_q4_threshold} GB)"
+            )
+        elif vram_status["used_gb"] > limit_gb:
+            st.caption(f"Policy: 4-bit fallback enabled (used > {limit_gb} GB)")
+        else:
+            st.caption(f"Policy: 16-bit preferred (≤{limit_gb} GB used)")
+    else:
+        st.caption("VRAM: unavailable")
+
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         try:
             manager.clear_chat_history(USER_ID)
@@ -94,6 +118,16 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Failed to clear history: {str(e)}")
+
+    if st.button("♻️ Free VRAM (Unload current model)", use_container_width=True):
+        try:
+            if manager.unload_current_user_model(USER_ID):
+                st.toast("✅ Unloaded current model and freed VRAM", icon="💾")
+            else:
+                st.warning("Could not unload the current model. It may not be loaded or available.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to free VRAM: {str(e)}")
 
     st.markdown("---")
 
@@ -160,11 +194,10 @@ except Exception as e:
 
 # --- FOOTER (INPUT & MODEL) ---
 with st.bottom:
-    # Inject CSS for seamless layout & auto-expand container
+    # Inject CSS for a compact, collapsible composer
     st.markdown(
         """
         <style>
-            /* Container styling to mimic an all-in-one input box */
             div[data-testid="stHorizontalBlock"] {
                 align-items: flex-end;
                 background-color: var(--secondary-background-color);
@@ -172,59 +205,118 @@ with st.bottom:
                 padding: 6px 10px;
                 border: 1px solid rgba(49, 51, 63, 0.2);
             }
-            /* Remove standard margins for compact internal feel */
             div[data-testid="stForm"] { border: none; }
             .stTextArea textarea {
                 border: none !important;
                 background: transparent !important;
-                resize: none;
+                resize: none !important;
+                min-height: 40px;
+                max-height: 150px;
+                overflow: auto;
+            }
+            .composer-toggle button {
+                width: 38px !important;
+                height: 38px !important;
+                padding: 0 !important;
+                border-radius: 50% !important;
+                font-size: 18px !important;
+                line-height: 1 !important;
+                min-width: unset !important;
             }
             div[data-baseweb="select"] {
-                min-width: 110px !important;
+                min-width: 130px !important;
+                max-width: 130px !important;
+            }
+            button[kind="primary"] {
+                min-width: 100% !important;
             }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Columns inside the unified input bar
-    input_cols = st.columns([0.78, 0.12, 0.10], gap="small")
+    # A simple collapsible composer using Streamlit state
+    if "composer_expanded" not in st.session_state:
+        st.session_state.composer_expanded = False
 
-    with input_cols[0]:
-        # st.text_area grows vertically; max_chars or height can be managed
-        st.text_area(
-            label="Message",
-            placeholder="Type your message here...",
-            label_visibility="collapsed",
-            key="temp_input",
-            height=40,  # Initial height
-        )
+    if not st.session_state.composer_expanded:
+        cols = st.columns([0.95, 0.05], gap="small")
+        with cols[1]:
+            st.markdown('<div class="composer-toggle">', unsafe_allow_html=True)
+            if st.button("✉️", key="composer_toggle", use_container_width=True):
+                st.session_state.composer_expanded = True
+            st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        input_cols = st.columns([0.70, 0.20, 0.07, 0.03], gap="small")
 
-    with input_cols[1]:
-        try:
-            current_model = manager.get_user_model(USER_ID)
-            available_models = manager.get_available_models()
-
-            if current_model not in available_models:
-                available_models.insert(0, current_model)
-
-            model_index = available_models.index(current_model)
-
-            st.selectbox(
-                label="Model",
-                options=available_models,
-                index=model_index,
+        with input_cols[0]:
+            st.text_area(
+                label="Message",
+                placeholder="Type your message here...",
                 label_visibility="collapsed",
-                key="selected_model_dropdown",
-                on_change=on_model_change,
+                key="temp_input",
+                height=90,
+                help="Enter = submit, Shift+Enter = newline",
             )
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
 
-    with input_cols[2]:
-        st.button(
-            "📤",
-            key="send_button",
-            use_container_width=True,
-            on_click=handle_send_button,
-        )
+            components.html(
+                """
+                <script>
+                function setupChatInput() {
+                    const textarea = document.querySelector('textarea[aria-label="Message"]');
+                    if (!textarea || textarea.dataset.submitAttached) return;
+                    textarea.dataset.submitAttached = 'true';
+
+                    textarea.addEventListener('keydown', function(event) {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                            event.preventDefault();
+                            const buttons = Array.from(document.querySelectorAll('button'));
+                            const sendBtn = buttons.find(btn => btn.innerText.trim() === '📤');
+                            if (sendBtn) {
+                                sendBtn.click();
+                            }
+                        }
+                    });
+                }
+                document.addEventListener('DOMContentLoaded', setupChatInput);
+                setTimeout(setupChatInput, 500);
+                </script>
+                """,
+                height=0,
+                scrolling=False,
+            )
+
+        with input_cols[1]:
+            try:
+                current_model = manager.get_user_model(USER_ID)
+                available_models = manager.get_available_models()
+
+                if current_model not in available_models:
+                    available_models.insert(0, current_model)
+
+                model_index = available_models.index(current_model)
+
+                st.selectbox(
+                    label="Model",
+                    options=available_models,
+                    index=model_index,
+                    label_visibility="collapsed",
+                    key="selected_model_dropdown",
+                    on_change=on_model_change,
+                )
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+
+        with input_cols[2]:
+            st.button(
+                "📤",
+                key="send_button",
+                use_container_width=True,
+                on_click=handle_send_button,
+            )
+
+        with input_cols[3]:
+            st.markdown('<div class="composer-toggle">', unsafe_allow_html=True)
+            if st.button("✕", key="composer_close", use_container_width=True):
+                st.session_state.composer_expanded = False
+            st.markdown('</div>', unsafe_allow_html=True)

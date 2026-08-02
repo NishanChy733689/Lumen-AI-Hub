@@ -14,6 +14,12 @@ from datetime import datetime
 import streamlit as st
 
 DEFAULT_MODEL = "smollm2:135m"
+VRAM_LIMIT_GB = 0.9
+FORCE_Q4_TOTAL_VRAM_GB = 2.0
+CONCISE_SYSTEM_INSTRUCTION = (
+    "You are a concise assistant. Answer directly and briefly in one or two sentences, "
+    "with no extra explanation unless explicitly asked."
+)
 THINKING_MODELS = {
     "qwen2.5:0.5b",
     "qwen2.5:1.5b",
@@ -199,6 +205,112 @@ class OllamaChatManager:
             disk_usage,
             system_information,
         ]
+
+    def get_vram_status(self) -> Optional[Dict[str, float]]:
+        """Return current NVIDIA GPU VRAM usage in GB when available."""
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            pynvml.nvmlShutdown()
+
+            if info.total <= 0:
+                return None
+
+            return {
+                "used_gb": round(info.used / (1024**3), 2),
+                "total_gb": round(info.total / (1024**3), 2),
+                "free_gb": round(info.free / (1024**3), 2),
+            }
+        except Exception as exc:
+            print(f"[VRAM] Could not read GPU memory: {exc}")
+            return None
+
+    def _build_model_candidates(self, model_name: str) -> List[str]:
+        """Build a priority list of model names including 4-bit fallback variants."""
+        base_model = self._sanitize_text(model_name, DEFAULT_MODEL)
+        if not base_model:
+            return []
+
+        if base_model.lower().endswith(("-q4", ":q4", "-q4_0", ":q4_0")):
+            return [base_model]
+
+        candidates: List[str] = []
+        seen = set()
+
+        for candidate in [
+            base_model,
+            f"{base_model}-q4",
+            f"{base_model}:q4",
+            f"{base_model}:q4_0",
+            f"{base_model}:q4_K_M",
+            f"{base_model}:4bit",
+        ]:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+        return candidates
+
+    def _ensure_concise_system_instruction(
+        self, messages: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        if not any(msg.get("role") == "system" for msg in messages):
+            return [{"role": "system", "content": CONCISE_SYSTEM_INSTRUCTION}] + messages
+        return messages
+
+    def _select_model_variant(
+        self,
+        model_name: str,
+        vram_used_gb: Optional[float] = None,
+        limit_gb: float = VRAM_LIMIT_GB,
+        available_models: Optional[List[str]] = None,
+    ) -> str:
+        """Choose a 16-bit model unless VRAM is above the threshold, then prefer a 4-bit variant if available."""
+        base_model = self._sanitize_text(model_name, DEFAULT_MODEL)
+        available = available_models or self.get_available_models()
+
+        vram_total_gb: Optional[float] = None
+        if vram_used_gb is None:
+            vram_status = self.get_vram_status()
+            if vram_status:
+                vram_used_gb = vram_status["used_gb"]
+                vram_total_gb = vram_status["total_gb"]
+            else:
+                vram_used_gb = None
+
+        low_total_vram = (
+            vram_total_gb is not None
+            and vram_total_gb <= FORCE_Q4_TOTAL_VRAM_GB
+        )
+
+        if not low_total_vram and (vram_used_gb is None or vram_used_gb <= limit_gb):
+            return base_model
+
+        fallback_reason = []
+        if low_total_vram:
+            fallback_reason.append(
+                f"total VRAM is low ({vram_total_gb} GB)"
+            )
+        if vram_used_gb is not None and vram_used_gb > limit_gb:
+            fallback_reason.append(
+                f"used VRAM {vram_used_gb} GB exceeds limit {limit_gb} GB"
+            )
+
+        reason = ", and ".join(fallback_reason) if fallback_reason else "policy"
+        for candidate in self._build_model_candidates(base_model):
+            if candidate in available:
+                print(
+                    f"[VRAM] {reason}; using fallback model '{candidate}'"
+                )
+                return candidate
+
+        print(
+            f"[VRAM] {reason}, but no 4-bit fallback was found for '{base_model}'"
+        )
+        return base_model
 
     def _connect_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -450,16 +562,22 @@ class OllamaChatManager:
 
         # Verify model is available
         available_models = self.get_available_models()
-        if model not in available_models:
-            error_msg = f"Model '{model}' not available. Available: {', '.join(available_models)}"
+        selected_model = self._select_model_variant(
+            model,
+            available_models=available_models,
+        )
+
+        if selected_model not in available_models:
+            error_msg = f"Model '{selected_model}' not available. Available: {', '.join(available_models)}"
             print(f"[ERROR] {error_msg}")
             raise RuntimeError(error_msg)
 
-        if think_mode and self.model_supports_thinking(model):
+        if think_mode and self.model_supports_thinking(selected_model):
             safe_prompt = "/think " + safe_prompt
 
         history = self.get_chat_history(safe_uid, max_messages=8)
         messages_payload = self._build_messages_payload(history, safe_prompt)
+        messages_payload = self._ensure_concise_system_instruction(messages_payload)
 
         self.append_message(safe_uid, "user", safe_prompt)
 
@@ -475,26 +593,26 @@ class OllamaChatManager:
             tools_param = None
 
         try:
-            print(f"[CHAT] Sending request to model: {model}")
+            print(f"[CHAT] Sending request to model: {selected_model}")
             print(f"[CHAT] Messages payload: {messages_payload}")
             chat_kwargs = {
-                "model": model,
+                "model": selected_model,
                 "messages": messages_payload,
                 "stream": True,
                 "options": {
                     "num_ctx": 1024,
-                    "num_predict": 512,
+                    "num_predict": 256,
                     "num_gpu": 24,
                     "num_batch": 32,
-                    "temperature": 0.7,
-                    "repeat_penalty": 1.1,
-                    "top_p": 0.9,
+                    "temperature": 0.35,
+                    "repeat_penalty": 1.05,
+                    "top_p": 0.85,
                     "top_k": 40,
                 },
             }
 
             # ONLY attach the tools key if the model explicitly supports it
-            if self.tool_support(model) and tools_param:
+            if self.tool_support(selected_model) and tools_param:
                 chat_kwargs["tools"] = tools_param
             response = ollama.chat(**chat_kwargs)
 
@@ -606,6 +724,19 @@ class OllamaChatManager:
             print(f"[VRAM] Unloaded model: {safe_model}")
         except Exception as exc:
             print(f"[WARNING] Could not unload model: {exc}")
+
+    def unload_current_user_model(self, uid: str) -> bool:
+        """Unload only the model that the given user is currently configured to use."""
+        safe_uid = self._normalize_uid(uid)
+        try:
+            current_model = self.get_user_model(safe_uid)
+            if current_model:
+                self.unload_model(current_model)
+                print(f"[VRAM] Unloaded current model for user '{safe_uid}': {current_model}")
+                return True
+        except Exception as exc:
+            print(f"[WARNING] Failed to unload current model for '{safe_uid}': {exc}")
+        return False
 
     def get_available_models(self) -> List[str]:
         """Fetch the list of models available locally from Ollama."""
